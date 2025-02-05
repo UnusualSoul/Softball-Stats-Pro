@@ -21,10 +21,11 @@ const LoginPage = () => {
     const handleSubmit = async (e) => {
         e.preventDefault();
 
-        const colRef = collection(db, "teams")
+        const colRef = collection(db, "teams");
         const teams = [];
-        const snapshot = await getDocs(colRef)
-            // .then((snapshot) => {
+
+        getDocs(colRef)
+            .then((snapshot) => {
                 console.log('snapshot.docs :', snapshot.docs);
                 snapshot.docs.forEach(doc => {
                     teams.push({ ...doc.data(), id: doc.id});
@@ -45,10 +46,10 @@ const LoginPage = () => {
                 if(isLoading){
                     
                 }
-            // })
-            // .catch(err => {
-            //     console.log(err.message);
-            // })
+            })
+            .catch(err => {
+                console.log(err.message);
+            })
     }
 
     return (
