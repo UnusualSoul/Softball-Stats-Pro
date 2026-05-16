@@ -16,7 +16,7 @@ import Globals from '../Globals';
 
 const NewGame = () => {
     const { teamName } = useParams();
-    const [players, setPlayers] = useState([])
+    const [battingOrder, setBattingOrder] = useState([])
     // const [tempPlayers, setTempPlayers] = useState(players);
     const [gameStats, setGameStats] = useState([]); 
     const [rbis, setRbis] = useState([]);
@@ -26,10 +26,11 @@ const NewGame = () => {
     const [popupToggle, setPopupToggle] = useState(false);
     const [secret, setSecret] = useState("");
     const goodButtons = [{ buttonText:"1st", playerOutcomes: "Single"}, { buttonText:"2nd", playerOutcomes: "Double"}, { buttonText:"3rd", playerOutcomes: "Triple"}, { buttonText:"Homerun", playerOutcomes: "Homerun"}]
-    const badButtons = ["Out", "Strikeout"];
+    const badButtons = ["Out", "Strikeout", "No Bat"];
     const [data, setData] = useState({});
     const [loading, setLoading] = useState(true);
     const [gameType, setGameType] = useState('');
+    const [forceOutcome, setForceOutcome] = useState('auto');
     const [allPlayers, setAllPlayers] = useState();
     const [lineupCards, setLineupCards] = useState([]);
     const [ourScore, setOurScore] = useState(0);
@@ -40,6 +41,14 @@ const NewGame = () => {
         success: false,
         message: ''
     });
+    const [statsSubmitted, setStatsSubmitted] = useState(false);
+
+    const gameHasStarted = battingOrder.length >= 3 && (
+        gameStats.some(stats => stats.length > 0) ||
+        rbis.some(r => r > 0) ||
+        ourScore > 0 ||
+        theirScore > 0
+    );
 
     useEffect(() => {
         const func = async () => {
@@ -66,12 +75,16 @@ const NewGame = () => {
             
             setData(teamPlayersInfo);
             const playerData = teamPlayersInfo.teamInfo.players;
+            console.log('🎯 NewGame - playerData:', playerData);
+            console.log('🎯 NewGame - playerData type:', typeof playerData, Array.isArray(playerData) ? 'ARRAY' : 'NOT ARRAY');
+            
             setAllPlayers(playerData);//.players.sort((a, b) => a.name > b.name ? 1 : -1));
             setLoading(false);
             const averagesNeeded = [];
             const gameStatsNeeded = [];
             const rbisNeeded = [];
             
+            console.log('🎯 NewGame - About to call forEach on playerData');
             playerData.forEach(() => {
                 averagesNeeded.push([0, 0]);   
                 gameStatsNeeded.push([]);
@@ -94,22 +107,24 @@ const NewGame = () => {
         if (selectedPlayerIdx >= 0){
             const stat = e.target.value;
 
-            if (goodButtons.some((elem) => elem.playerOutcomes === stat) || badButtons.includes(stat)) {
+            if (goodButtons.some((elem) => elem.playerOutcomes === stat) || badButtons.includes(stat) || stat === 'No Bat') {
                 const copiedStats = [...gameStats];
-                // goodButtons.find((elem) => elem.playerOutcomes === stat
                 copiedStats[selectedPlayerIdx].push(stat);
                 setGameStats(copiedStats);
 
-                const copiedAverage = [...average];
-                copiedAverage[selectedPlayerIdx][1] += 1;
-    
-                if (goodButtons.some((elem) => elem.playerOutcomes === stat)) {
-                    copiedAverage[selectedPlayerIdx][0] += 1;
+                if (stat !== 'No Bat') {
+                    const copiedAverage = [...average];
+                    copiedAverage[selectedPlayerIdx][1] += 1;
+
+                    if (goodButtons.some((elem) => elem.playerOutcomes === stat)) {
+                        copiedAverage[selectedPlayerIdx][0] += 1;
+                        // Auto-add score for home runs
+                        if (stat === "Homerun") {
+                            setOurScore(prev => prev + 1);
+                        }
+                    }
+                    setAverage(copiedAverage);
                 }
-                setAverage(copiedAverage);
-                
-                // if(updatePoints)
-                //     setOurScore(prev => ++prev);
             }
             else if (stat === "RBI+" || (stat === "RBI-" && rbis[selectedPlayerIdx] > 0)){
                 const copiedRBIs = [...rbis];
@@ -137,6 +152,10 @@ const NewGame = () => {
             if (deletedStat){
                 if (goodButtons.some((elem) => elem.playerOutcomes === deletedStat)){
                     currAvgStats[selectedPlayerIdx][0] -= 1;
+                    // Auto-remove score if homerun is deleted
+                    if (deletedStat === "Homerun") {
+                        setOurScore(prev => prev - 1);
+                    }
                 }
                 currAvgStats[selectedPlayerIdx][1] -= 1;
                 setAverage(currAvgStats);
@@ -149,89 +168,120 @@ const NewGame = () => {
     const handleLineupForm = (e) => {
         e.preventDefault();
         Globals.toggleCB(setLineupToggle);
-        setPlayers(lineupCards);
+        setBattingOrder(lineupCards);
     }
+
+    useEffect(() => {
+        if (gameHasStarted) {
+            setLineupToggle(false);
+        }
+    }, [gameHasStarted]);
+
+    useEffect(() => {
+        const handleBeforeUnload = (e) => {
+            if (gameHasStarted && !statsSubmitted) {
+                e.preventDefault();
+                e.returnValue = '';
+                return '';
+            }
+        };
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, [gameHasStarted, statsSubmitted]);
     
-    const handleSubmitStatsForm = async (e) => {
+    const handleSubmitStatsForm = (e) => {
         e.preventDefault();
         
         try {
             if (data.teamInfo.secret === secret) {
                 // get current players information
+                const currentYear = new Date().getFullYear() - 1;
                 const docRef = doc(db, "teams", teamName);
-                const docSnap = await getDoc(docRef);
-                const teamPlayers = docSnap.data().players;
-                const batch = writeBatch(db);
+                // get session information
+                let sessionRef = doc(db, "teams", teamName, "allSeasons", currentYear.toString());
+                Promise.all([getDoc(docRef), getDoc(sessionRef)]).then(([docSnap, sessionSnap]) => {
+                    const batch = writeBatch(db);
 
-                for (const player of players) {
-                    const updatedPlayers = teamPlayers.map((tempPlayer) => {
-                        const battingAverage = Globals.calculateAverage(tempPlayer);
-                        if(!battingAverage)
-                            return tempPlayer;
+                    const originalPlayerStats = docSnap.data().players;
+                    
+                    const updatedPlayers = originalPlayerStats.map((originalPlayerStat) => {
+                        const batter = battingOrder.find(bat => bat.name === originalPlayerStat.name);
+                        if (!batter) return originalPlayerStat;
 
                         const prevStats = {
-                            singles: player.singles,
-                            doubles: player.doubles,
-                            triples: player.triples,
-                            homeruns: player.homeruns,
-                            outs: player.outs,
-                            strikeouts: player.strikeouts,
-                            rbis: player.rbis,
-                            games: player.games,
+                            singles: originalPlayerStat.singles,
+                            doubles: originalPlayerStat.doubles,
+                            triples: originalPlayerStat.triples,
+                            homeruns: originalPlayerStat.homeruns,
+                            outs: originalPlayerStat.outs,
+                            strikeouts: originalPlayerStat.strikeouts,
+                            rbis: originalPlayerStat.rbis,
+                            games: originalPlayerStat.games,
                         };
-                        if (lineupCards.some(card => card.name === player.name)) {
-                            const idx = players.map(e => e.name).indexOf(player.name);
-                            gameStats[idx].forEach((type) => {
-                                if (type === "Single") {
-                                    prevStats.singles += 1;
-                                } else if (type === "Double") {
-                                    prevStats.doubles += 1;
-                                } else if (type === "Triple") {
-                                    prevStats.triples += 1;
-                                } else if (type === "Homerun") {
-                                    prevStats.homeruns += 1;
-                                } else if (type === "Strikeout") {
-                                    prevStats.strikeouts += 1;
-                                } else if (type === "Out") {
-                                    prevStats.outs += 1;
-                                }
-                            });
-                            prevStats.rbis += rbis[idx];
-                            if (gameStats[idx].length > 0){
-                                prevStats.games += 1;
-                            }
-                            return { ...player, ...prevStats };
+                        
+                        const idx = battingOrder.map(e => e.name).indexOf(batter.name);
+                        gameStats[idx].forEach((type) => {
+                            if (type === "Single")
+                                prevStats.singles += 1;
+                            else if (type === "Double")
+                                prevStats.doubles += 1;
+                            else if (type === "Triple")
+                                prevStats.triples += 1;
+                            else if (type === "Homerun")
+                                prevStats.homeruns += 1;
+                            else if (type === "Strikeout")
+                                prevStats.strikeouts += 1;
+                            else if (type === "Out") 
+                                prevStats.outs += 1;
+                        });
+                        prevStats.rbis += rbis[idx];
+                        if (gameStats[idx].length > 0){
+                            prevStats.games += 1;
                         }
-                        return player;
+                        return { ...originalPlayerStat, ...prevStats };
                     });
+
                     batch.update(docRef, { players: updatedPlayers });
-                }
 
-                const currentYear = new Date().getFullYear();
-                let outcome = 1;
-                if(ourScore > theirScore) 
-                    outcome = 2;
-                else if (ourScore < theirScore)
-                    outcome = 0;
-                
-                const sessionRef = doc(db, "teams", teamName, "allSeasons", currentYear.toString());
-                batch.update(sessionRef, { games: arrayUnion({
-                    battingOrder: players.map(person => person.name),
-                    datePlayed: new Date(),
-                    isPlayoffs: gameType === "playoff",
-                    isPractice: gameType === "practice",
-                    opponentTeamName: opponentTeamName,
-                    ourScore: ourScore,
-                    outcome: outcome,
-                    theirScore: theirScore,
-                })});
+                    let outcome = 1;
+                    if (forceOutcome === 'us') {
+                        outcome = 2;
+                    } else if (forceOutcome === 'them') {
+                        outcome = 0;
+                    } else if (ourScore > theirScore) {
+                        outcome = 2;
+                    } else if (ourScore < theirScore) {
+                        outcome = 0;
+                    }
 
-                await batch.commit();
+                    const sessionData = sessionSnap.exists() ? sessionSnap.data() : { games: [] };
+                    const gameNumber = calculateGameNumber(sessionData.games, gameType);
 
-                setSaveGameResult({
-                    show: true,
-                    success: true,
-                    message: 'Stats have been successfully added'
+                    const newGameData = {
+                        battingOrder: battingOrder.map(person => person.name),
+                        datePlayed: new Date(),
+                        isPlayoffs: gameType === "playoff",
+                        isPractice: gameType === "practice",
+                        opponentTeamName: opponentTeamName,
+                        ourScore: ourScore,
+                        outcome: outcome,
+                        theirScore: theirScore,
+                        gameNumber: gameNumber
+                    };
+                    
+                    if(sessionSnap.exists())
+                        batch.update(sessionRef, { games: arrayUnion(newGameData)});
+                    else
+                        batch.set(sessionRef, { games: [newGameData] });
+
+                    batch.commit().then(() => {
+                        setSaveGameResult({
+                            show: true,
+                            success: true,
+                            message: 'Stats have been successfully added'
+                        });
+                        setStatsSubmitted(true);
+                    });
                 });
             } else {
                 setSaveGameResult({
@@ -250,35 +300,48 @@ const NewGame = () => {
         }
     };
 
+    const calculateGameNumber = (games = [], thisGameType) => {
+        let gameTypeCounter = 0;
+        const currentGames = Array.isArray(games) ? games : [];
+        currentGames.forEach(sessionGame => {
+            if ((thisGameType === "playoff" && sessionGame.isPlayoffs) ||
+                (thisGameType === "practice" && sessionGame.isPractice) ||
+                (thisGameType === "regular" && !sessionGame.isPractice && !sessionGame.isPlayoffs)) {
+                gameTypeCounter++;
+            }
+        });
+        return ++gameTypeCounter;
+    }
+
     const goToPreviousBatter = () => {
-        selectedPlayerIdx - 1 > -1 ? setSelectedPlayerIdx(prev => prev - 1) : setSelectedPlayerIdx(players.length - 1);
+        selectedPlayerIdx - 1 > -1 ? setSelectedPlayerIdx(prev => prev - 1) : setSelectedPlayerIdx(battingOrder.length - 1);
     }
 
     const goToNextBatter = () => {
-        selectedPlayerIdx + 1 < players.length ? setSelectedPlayerIdx(prev => prev + 1) : setSelectedPlayerIdx(0);
+        selectedPlayerIdx + 1 < battingOrder.length ? setSelectedPlayerIdx(prev => prev + 1) : setSelectedPlayerIdx(0);
     }
 
-    const getNext3Batters = (players, idx) => {
+    const getNext3Batters = (battingOrder, idx) => {
         const battersIndexes = [];
-        if(Boolean(players.length >= 3)){
-            if(players[idx]){
-                battersIndexes[0] = [players[idx]];
-                if(players[idx + 1]){
-                    battersIndexes[1] = [players[idx + 1]];
-                    if(players[idx + 2])
-                        battersIndexes[2] = [players[idx + 2]];
+        if(Boolean(battingOrder.length >= 3)){
+            if(battingOrder[idx]){
+                battersIndexes[0] = [battingOrder[idx]];
+                if(battingOrder[idx + 1]){
+                    battersIndexes[1] = [battingOrder[idx + 1]];
+                    if(battingOrder[idx + 2])
+                        battersIndexes[2] = [battingOrder[idx + 2]];
                     else
-                        battersIndexes[2] = [players[0]];
+                        battersIndexes[2] = [battingOrder[0]];
                 }
                 else{
-                    battersIndexes[1] = [players[0]];
-                    battersIndexes[2] = [players[1]];
+                    battersIndexes[1] = [battingOrder[0]];
+                    battersIndexes[2] = [battingOrder[1]];
                 }
             }
             else{
-                battersIndexes[0] = [players[0]];
-                battersIndexes[1] = [players[1]];
-                battersIndexes[2] = [players[2]];
+                battersIndexes[0] = [battingOrder[0]];
+                battersIndexes[1] = [battingOrder[1]];
+                battersIndexes[2] = [battingOrder[2]];
             }
         }
         else 
@@ -293,21 +356,21 @@ const NewGame = () => {
             {loading ? (<><h1 className="loading">Loading Game...</h1><NavBar teamName={teamName}/></>) : (
             <>
                 {lineupToggle && <EditLineup lineupToggle={lineupToggle} setLineupToggle={setLineupToggle} handleLineupForm={handleLineupForm} allPlayers={allPlayers} lineupCards={lineupCards} setLineupCards={setLineupCards} removePlayerFromFunctions={[setRbis, setGameStats, setAverage]} />}
-                {popupToggle && <SubmitStats popupToggle={popupToggle} setPopupToggle={setPopupToggle} setSecret={setSecret} setOpponentTeamName={setOpponentTeamName} handleSubmitStatsForm={handleSubmitStatsForm} setGameType={setGameType} saveGameResult={saveGameResult}/>}
+                {popupToggle && <SubmitStats popupToggle={popupToggle} setPopupToggle={setPopupToggle} setSecret={setSecret} setOpponentTeamName={setOpponentTeamName} handleSubmitStatsForm={handleSubmitStatsForm} setGameType={setGameType} setForceOutcome={setForceOutcome} forceOutcome={forceOutcome} saveGameResult={saveGameResult}/>}
                 <NavBar teamName={teamName}/>
                 <Container className={`${lineupToggle ? "blurred" : ""}`}>
                     <Row xs={12} className='mb-1'>
                         <Col className='isInlineGrid'>
                             <ButtonGroup>
-                                <Button onClick={() => Globals.toggleCB(setLineupToggle)} className={players.length < 3 ? 'w-100' : 'w-50 whiteBorder'}>Lineup</Button>
-                                { players.length >= 3 &&
+                                <Button onClick={() => Globals.toggleCB(setLineupToggle)} className={battingOrder.length < 3 ? 'w-100' : 'w-50 whiteBorder'} disabled={gameHasStarted} title={gameHasStarted ? 'Lineup locked after the game starts' : ''}>Lineup</Button>
+                                { battingOrder.length >= 3 &&
                                     <Button className='w-50 whiteBorder' variant='success' onClick={()=> Globals.toggleCB(setPopupToggle)}>Submit Stats</Button>
                                 }
                             </ButtonGroup>
                         </Col>
                     </Row>
                     <Row className='mb-2'>
-                        { players.length >= 3 &&
+                        { battingOrder.length >= 3 &&
                             <Col xs={12}>
                                 <ListGroup horizontal className='my-1'>
                                     <ListGroup.Item id='ourScore' className='vertical-align:middle'>Us: {ourScore}</ListGroup.Item>
@@ -337,16 +400,16 @@ const NewGame = () => {
                         }
                     </Row>
                     <Row id="currentBatterRow" className='mb-2'>
-                        { players.length >= 3  && 
+                        { battingOrder.length >= 3  && 
                             <Col className="currentBatterNav">
                                 <svg xmlns="http://www.w3.org/2000/svg" onClick={goToPreviousBatter} fill={'currentColor'} className="bi bi-chevron-compact-left goToPreviousBatter" viewBox="5 0 5 16" preserveAspectRatio="none">
                                 <path fillRule="evenodd" d="M9.224 1.553a.5.5 0 0 1 .223.67L6.56 8l2.888 5.776a.5.5 0 1 1-.894.448l-3-6a.5.5 0 0 1 0-.448l3-6a.5.5 0 0 1 .67-.223"/>
                                 </svg>
                             </Col>
                         }
-                        { getNext3Batters(players, selectedPlayerIdx)[0]?.map((player) => (
-                            <Col xs="10" className={`${player === players[selectedPlayerIdx] ? "selected" : ""}`} key={'selected_' + selectedPlayerIdx}>
-                                <label className={`${player === players[selectedPlayerIdx] ? "selectedPlayer" : "notSelectedPlayer"}`} htmlFor={player.name}>
+                        { getNext3Batters(battingOrder, selectedPlayerIdx)[0]?.map((player) => (
+                            <Col xs="10" className={`${player === battingOrder[selectedPlayerIdx] ? "selected" : ""}`} key={'selected_' + selectedPlayerIdx}>
+                                <label className={`${player === battingOrder[selectedPlayerIdx] ? "selectedPlayer" : "notSelectedPlayer"}`} htmlFor={player.name}>
                                     <ListGroup>
                                         <ListGroup.Item className='lineupListGroupItemTop'>Batter # {(selectedPlayerIdx + 1)}</ListGroup.Item>
                                     </ListGroup>
@@ -361,7 +424,7 @@ const NewGame = () => {
                                 </label>
                             </Col>
                         ))}
-                        { players.length >= 3  &&
+                        { battingOrder.length >= 3  &&
                             <Col className="currentBatterNav">
                                 <svg xmlns="http://www.w3.org/2000/svg" onClick={goToNextBatter} fill={'currentColor'} className="bi bi-chevron-compact-right goToNextBatter" viewBox="6 0 5 16" preserveAspectRatio="none">
                                     <path fillRule="evenodd" d="M6.776 1.553a.5.5 0 0 1 .671.223l3 6a.5.5 0 0 1 0 .448l-3 6a.5.5 0 1 1-.894-.448L9.44 8 6.553 2.224a.5.5 0 0 1 .223-.671"/>
@@ -372,10 +435,10 @@ const NewGame = () => {
                     <Row className='mb-2'>
                         <Col xs={{ span: 10, offset: 1 }}>
                             <ListGroup>
-                                {getNext3Batters(players, selectedPlayerIdx)[1]?.map((player) => (
+                                {getNext3Batters(battingOrder, selectedPlayerIdx)[1]?.map((player) => (
                                     <ListGroup.Item key={`OnDeck${player.name}`}><b>Deck: </b>{player.name}</ListGroup.Item>
                                 ))}
-                                {getNext3Batters(players, selectedPlayerIdx)[2]?.map((player) => (
+                                {getNext3Batters(battingOrder, selectedPlayerIdx)[2]?.map((player) => (
                                     <ListGroup.Item key={`OnDeck${player.name}`}><b>Hole: </b>{player.name}</ListGroup.Item>
                                 ))}
                             </ListGroup>
@@ -383,7 +446,7 @@ const NewGame = () => {
                     </Row>
                     <Row>
                         <Col className='px-2 isInlineGrid' xs={12} md={11}>
-                            { players.length >= 3 && (
+                            { battingOrder.length >= 3 && (
                             <>
                                 <ButtonGroup className='mb-1'>
                                     <Button className="px-1 buttonGroupLabel whiteBorder" disabled>On Base</Button>
@@ -410,7 +473,7 @@ const NewGame = () => {
                         </Col>
                     </Row>
                     {lineupCards.map((player, idx) => (
-                        <input key={'radio_' + idx} id={player.name} type="radio" name="selector" className='hidden' value={idx} checked={player?.name === players[selectedPlayerIdx]?.name} onChange={handleRadioChange} />
+                        <input key={'radio_' + idx} id={player.name} type="radio" name="selector" className='hidden' value={idx} checked={player?.name === battingOrder[selectedPlayerIdx]?.name} onChange={handleRadioChange} />
                     ))}
                 </Container>
             </>)}

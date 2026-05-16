@@ -1,12 +1,13 @@
 import React  from 'react';
 // import CloseButton from 'react-bootstrap/CloseButton';
 import Button from 'react-bootstrap/Button';
+import ButtonGroup from 'react-bootstrap/ButtonGroup';
 import Modal from 'react-bootstrap/Modal';
 import Form from 'react-bootstrap/Form';
 import Toast from 'react-bootstrap/Toast';
 import Globals from '../Globals';
 
-const SubmitStats = ({popupToggle, setPopupToggle, setSecret, setOpponentTeamName, handleSubmitStatsForm, setGameType, saveGameResult}) => {
+const SubmitStats = ({popupToggle, setPopupToggle, setSecret, setOpponentTeamName, handleSubmitStatsForm, setGameType, setForceOutcome, forceOutcome, saveGameResult}) => {
     const gameTypes = ["regular", "playoff", "practice"];
     return (
         <div className="modal show" style={{ display: 'block', position: 'initial' }} >
@@ -33,6 +34,17 @@ const SubmitStats = ({popupToggle, setPopupToggle, setSecret, setOpponentTeamNam
                                     onChange={() => setGameType(gameType)}
                                 />
                             )}
+                        </Form.Group>
+                        <Form.Group className='mb-2'>
+                            <Form.Label>Result</Form.Label>
+                            <ButtonGroup className='d-flex flex-wrap'>
+                                <Button type='button' variant={forceOutcome === 'auto' ? 'primary' : 'outline-primary'} onClick={() => setForceOutcome('auto')}>Auto</Button>
+                                <Button type='button' variant={forceOutcome === 'us' ? 'success' : 'outline-success'} onClick={() => setForceOutcome('us')}>We Win</Button>
+                                <Button type='button' variant={forceOutcome === 'them' ? 'danger' : 'outline-danger'} onClick={() => setForceOutcome('them')}>They Win</Button>
+                            </ButtonGroup>
+                            <Form.Text muted>
+                                Auto uses the entered score. Override the stored winner if needed.
+                            </Form.Text>
                         </Form.Group>
                         <Form.Group className="mb-2" controlId="formPassword">
                             <Form.Label>Team Password</Form.Label>
